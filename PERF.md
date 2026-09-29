@@ -38,3 +38,37 @@ python3 -m pytest tests/ -q     # 18 tests, includes e2e pipeline timing sanity
   gate's dense grids are the fixed overhead (~15–20 ms of the 71 ms).
   If the book grows past ~500 quotes/expiry, consider subsampling wings or
   moving the gate to a coarser grid with a documented tolerance.
+
+## P2 pricing engine (2026-09-29)
+
+Workload: canonical 2Y single-asset snowball, flat 25% vol, daily steps
+(504 steps), contractual discrete barriers, no Greeks, batch_size=100k.
+
+| N paths | wall | paths/sec | price | SE |
+|---|---|---|---|---|
+| 100k | 13.5 s | 7,382 | 0.985909 | 4.3e-04 |
+| 1M | 110.2 s | 9,078 | 0.985837 | 1.4e-04 |
+
+Dupire grid build (161×61, analytic SSVI path): <0.01 s — negligible vs
+simulation. The per-step Python loop (~504 iterations of vector ops +
+bilinear local-vol lookup per asset) dominates; a numba/Rust port of the
+step loop is the obvious next step if reprice frequency demands it.
+
+### QMC vs antithetic MC
+
+- Vanilla call (smooth-ish payoff), N=20k, |err| vs Black-Scholes over
+  4 seeds: QMC 1.2e-03 vs antithetic MC 1.0e-01 — QMC wins ~86x. The
+  Sobol + Brownian-bridge machinery works as designed.
+- Snowball (digital KO / KI-triggered put), N=50k, |err| vs 1M-path
+  reference over 4 seeds: QMC 2.7e-04 vs antithetic MC 2.3e-04 — no gain.
+  The barrier discontinuities blunt QMC's smoothness advantage (expected;
+  cf. QMC literature on digital payoffs). The Sobol driver's value here is
+  deterministic reproducibility, not variance. A bridge-probability-weighted
+  ("smoothed") barrier estimator is candidate future work.
+
+### How to re-run
+
+```
+python3 scripts/p2_benchmark.py
+python3 -m pytest tests/test_pricing.py -q   # 16 P2 tests
+```

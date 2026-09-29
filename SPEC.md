@@ -120,16 +120,55 @@ All three must pass on dense grids or the surface is quarantined
 - End-to-end: synthetic feed → ticks → IV → surface → snapshot publish,
   versions 1, 2, …; stale versions rejected.
 
-## 3. Pricing engine contract (P2 placeholder)
+## 3. Pricing engine contract (P2 — implemented 2026-09-29)
 
-- Dynamics: Dupire local volatility calibrated from the snapshot (P2); SLV as
-  follow-up. Model choice is recorded per price (model risk attribution).
-- Path generation: Sobol QMC + Brownian bridge; barriers evaluated at
-  contractual observation dates; BGK-corrected bridge on any coarsened step.
-- Greeks: adjoint (AAD) / likelihood-ratio — no bump-and-revalue on the
-  real-time path.
-- Every price ships with: model id, surface version, N paths, SE estimate,
-  ε-budget attribution.
+### 3.1 TermSheet (frozen dataclass, `snowball_pricer/pricing/payoff.py`)
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| tenor_years | float | 2.0 | maturity in years (252 trading days/yr) |
+| ko_barrier | float | 1.00 | autocall barrier, fraction of initial basket (=1) |
+| ko_obs_every_days | int | 21 | KO observation spacing (trading days) |
+| ki_barrier | float | 0.80 | knock-in barrier, fraction of initial basket; ≤0 disables KI |
+| coupon_annual | float | 0.15 | autocall/maturity coupon, p.a., pro-rata |
+| notional | float | 1.0 | price quoted per unit notional |
+| discount_rate | float \| None | None | None → first underlying's rate |
+
+Payoff (discounted): KO at obs j → `(1 + coupon·t_j)`; no KO + KI →
+`min(1, B(T))`; no KO + no KI → `(1 + coupon·T)`. B(t) = Σ wⱼ·Sⱼ(t)/Sⱼ(0).
+
+### 3.2 Basket (P2: average linkage confirmed 2026-09-29, NOT worst-of)
+`UnderlyingSpec(name, weight, spot=None, rate=None, div_yield=None,
+surface=None)` — None fields resolve from the priced snapshot's surface.
+Weights normalized by the engine. Correlation: user-supplied matrix via
+`price(..., corr=...)`; default identity. Calibrated correlation is P3.
+
+### 3.3 Engine (`snowball_pricer/pricing/engine.py`)
+`price(snapshot, termsheet, underlyings, cfg=EngineConfig(), corr=None)`
+→ `PriceResult(price, std_error, ko_prob, ko_prob_se, delta{per name},
+vega_per_vol_pt, n_paths, timing{}, surface_version, tenor_years)`.
+Consumes ONLY the P1 `VolSurfaceSnapshot` contract. `EngineConfig`:
+n_paths, qmc=True, seed, steps_per_day=1, batch_size, ki_bridge=False,
+ko_bridge=False (contractual discrete monitoring by default; bridge flags
+select the continuous-touch variant), compute_greeks, delta_bump.
+
+### 3.4 Dynamics & simulation (see docs/p2_design.md)
+- Dupire local vol from the snapshot (Gatheral form; analytic SSVI
+  derivatives, FD fallback; vol floor 0.5%, cap 150% with diagnostics).
+- Sobol QMC + Brownian-bridge path construction; Cholesky correlation;
+  antithetic fallback. Batching: one Sobol sequence advanced across batches.
+- Greeks: CRN central bump delta (barriers fixed absolute via norm_spots),
+  +1pt parallel implied-surface bump vega, KO probability. Pathwise/AAD
+  deliberately NOT implemented (barrier discontinuities; see §5 note in
+  p2_design.md). AAD deferred as documented future work.
+
+### 3.5 P2 acceptance (met 2026-09-29)
+- Vanilla call/put vs Black-Scholes: max 3.1 bps (N=100k QMC, flat vol).
+- Flat-vol snowball vs P0 reference 0.98699: within 35 bps (bridges off).
+- KO prob: discrete vs lognormal-digital analytic <5%; bridge vs
+  reflection-principle touch analytic <5%.
+- Greeks: delta in continuation region ∈ (0, 1.5); vega < 0
+  (bridges-off vega −0.203%/pt vs P0 −0.195%/pt).
+- Convergence: SE(20k)/SE(80k) ∈ [1.6, 2.4] (≈2.0 expected).
 
 ## 4. Error budget (acceptance criteria)
 
