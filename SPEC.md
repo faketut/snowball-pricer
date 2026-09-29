@@ -5,7 +5,10 @@
 Unless a term sheet overrides, the reference contract priced by this project is:
 
 - **Underlying:** basket of N regional equity underlyings (constituents TBD per
-  term sheet). **Basket vs worst-of linkage: TBD — user to confirm product form.**
+  term sheet). **Basket linkage: CONFIRMED 2026-09-29 — basket average
+  (weighted average of constituent performances), NOT worst-of.** Correlation
+  sensitivity is therefore lower than worst-of; P3 correlation module still
+  required but with milder stress scenarios.
   P0–P2 implement single-asset; multi-asset payoff linkage is a P3 decision that
   changes the correlation module, not the engine interface.
 - **Tenor:** 2Y (configurable).
