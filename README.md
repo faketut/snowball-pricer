@@ -27,7 +27,7 @@ broker WebSocket ticks -> IV inversion -> arbitrage-free SSVI surface
 | Phase | Scope | Status |
 |---|---|---|
 | **P0** | Define X: quantify the three error classes on a simplified snowball | ✅ done (`scripts/p0_error_scaling.py`, `docs/error_budget.md`) |
-| **P1** | Data pipeline: WS tick ingest → per-quote IV inversion → SSVI arbitrage-free surface → versioned snapshot publish | planned |
+| **P1** | Data pipeline: WS tick ingest → per-quote IV inversion → SSVI arbitrage-free surface → versioned snapshot publish | ✅ done (`snowball_pricer/`, `tests/`, `docs/p1_design.md`, `PERF.md`) |
 | **P2** | Pricing engine: Dupire local vol + Brownian bridge + Sobol QMC; AAD Greeks | planned |
 | **P3** | Correlation module (basket / worst-of) + stress scenarios | planned |
 | **P4** | Historical replay validation: rebuild past surfaces from tick history, hedge-simulation P&L explain | planned |

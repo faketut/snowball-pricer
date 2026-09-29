@@ -23,19 +23,99 @@ Unless a term sheet overrides, the reference contract priced by this project is:
   monitoring — never silently replaced by continuous monitoring; any continuous
   approximation must carry the BGK continuity correction, validated in P0).
 
-## 2. Data contracts (P1 placeholder — to be specified before implementation)
+## 2. Data contracts (P1 — implemented)
 
-- `VolSurfaceSnapshot`: **versioned, immutable**; fields: `asof` (exchange ts),
-  per-expiry **SSVI parameters** (arbitrage-free by construction) *or* strike
-  grid IVs, forward curve, discount curve, dividend assumptions, barrier-shift
-  metadata. Exact schema TBD in P1 SPEC.
-- **Publish/subscribe:** lock-free single-publisher snapshot ring; pricing
-  threads always read a complete, versioned snapshot — never a torn surface.
-  Tick-to-snapshot latency budget TBD in P1.
-- **Invariants:** no calendar-spread arbitrage, no butterfly arbitrage across
-  the published surface (P1 acceptance gate); wing extrapolation rule explicit
-  (KI barrier lives in the deep-OTM wing — extrapolation choice is a priced
-  assumption, logged per snapshot).
+### 2.1 Tick schema: `OptionQuote` (frozen dataclass, `snowball_pricer/tick.py`)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ts` | float | exchange timestamp, epoch seconds |
+| `underlying_id` | str | e.g. `"510300"` / `"SYN"` (synthetic) |
+| `expiry` | float | years to expiry, T > 0 |
+| `strike` | float | K > 0 |
+| `is_call` | bool | call / put |
+| `bid`, `ask` | float | raw quote; `bid > 0`, `ask >= bid` (crossed quotes rejected by `is_valid()`) |
+| `underlying_price` | float | spot S at `ts` |
+| `rate` | float | cont-compounded risk-free r |
+| `div_yield` | float | cont-compounded dividend yield q |
+
+Derived: `mid`, `spread`, `key()` = `(underlying_id, expiry, strike, is_call)`,
+`discount()`, `forward_spot()` (fallback forward).
+
+### 2.2 Feed interface (`Feed.subscribe(symbols) -> Iterator[OptionQuote]`)
+
+- Unbounded quote iterator; caller drives pacing, no hidden threads.
+- `SyntheticTickFeed`: validation backbone — quotes from a known ground-truth
+  SSVI surface + microstructure noise (spread = max(tick, spread_bps·mid),
+  iid Gaussian mid noise, deterministic per seed). **No broker is connected.**
+- `BrokerWsFeed`: explicit stub (raises `NotImplementedError`). The adapter
+  contract is documented in its docstring: approved-flow credentials only,
+  exchange-ts normalization, heartbeat/sequence-gap health, reconnect with
+  backoff + full snapshot resync, raw bid/ask forwarded (no mid fabrication).
+  **Open: broker venue choice (MiniQMT / QMT / 恒生 / vendor) — needed from Jian.**
+
+### 2.3 IV inversion (`snowball_pricer/iv.py`)
+
+- European exercise assumed (SSE ETF options are European; de-Americanization
+  out of scope — documented).
+- Forward-first: put-call parity at the strike nearest the spot-implied
+  forward among strikes quoting both sides; else spot-implied forward.
+- Newton–Raphson on Black price (vega) with bisection fallback on [1e-9, 20];
+  price tolerance 1e-10. `DegenerateQuoteError` on non-positive inputs,
+  above-cap or below-intrinsic prices; price ≈ intrinsic ⇒ vol 0.0
+  (numerically unidentifiable time value, not an error).
+- Quotes that fail inversion are dropped from calibration (counted in
+  diagnostics), never silently patched.
+
+### 2.4 Surface: `VolSurface` (frozen dataclass, `snowball_pricer/surface.py`)
+
+- Published form is **SSVI by construction**: per-expiry ATM total variances
+  `thetas` (non-decreasing via PAVA isotonic regression — no calendar arb),
+  global `(rho, eta, gamma)` with soft fit-time penalty
+  `eta·(1+|rho|) ≤ 1.9`, per-expiry forwards, spot/rate/div.
+- Queries: `total_var(k, T)`, `iv(k, T)`, `iv_from_strike(K, T)`; `theta_at(T)`
+  interpolates linearly in T (linear-from-origin below first expiry, flat
+  beyond last — documented extrapolation choice).
+- Wings: no ad-hoc extrapolation — the SSVI formula is the extrapolator;
+  asymptotic slope bounded by Lee's moment formula (numeric gate, §2.5).
+
+### 2.5 No-arbitrage gate (`snowball_pricer/arbitrage.py`) — publish blocker
+
+All three must pass on dense grids or the surface is quarantined
+(`ArbitrageViolation`, never published; previous good snapshot stays live):
+- **calendar**: `w(k,T)` non-decreasing in T ∀k;
+- **butterfly**: Durrleman `g(k) ≥ 0` per expiry slice;
+- **wings**: asymptotic slope of `w` vs `|k|` ≤ 2 (Lee).
+
+### 2.6 Snapshot store (`snowball_pricer/snapshot.py`)
+
+- `VolSurfaceSnapshot`: immutable `(surface, version, asof, source, n_quotes,
+  rmse_iv)`; versions monotonic from 1 per store.
+- `SnapshotStore.publish()`: single-publisher atomic swap (GIL-atomic ref
+  assignment in CPython). **Lock-free contract for the future Rust port**
+  (documented in module docstring): readers via `latest()` never block and
+  always see a complete versioned snapshot — port must use `arc_swap` /
+  seqlock equivalent. `publish_snapshot()` rejects stale versions.
+- Bounded diagnostic history ring (ops only, not part of the publish contract).
+
+### 2.7 Pipeline cadence (`snowball_pricer/pipeline.py`)
+
+- **Fast path** (per tick): `QuoteStore.update` + single-quote IV — µs scale.
+- **Slow path** (cadence: every N ticks / seconds / on large underlying move):
+  full `rebuild_surface` = invert book + calibrate + gate + publish.
+- Measured baselines in `PERF.md` (2026-09-29): fast p50 8.2µs / p99 43µs;
+  full rebuild p50 71ms / p99 90ms (< 100ms p99 target ✅).
+
+### 2.8 P1 acceptance (met 2026-09-29)
+
+- 18/18 pytest green (`tests/`).
+- Calibration recovery on synthetic ground truth: grid RMSE **0.0002** vol pts
+  (target < 0.3); params recovered to ~3 decimals.
+- Arbitrage suite: passes on calibrated surface; correctly rejects
+  calendar-violating thetas, spiked-smile butterfly violation, steep wings;
+  builder quarantines on gate failure without replacing the live snapshot.
+- End-to-end: synthetic feed → ticks → IV → surface → snapshot publish,
+  versions 1, 2, …; stale versions rejected.
 
 ## 3. Pricing engine contract (P2 placeholder)
 
