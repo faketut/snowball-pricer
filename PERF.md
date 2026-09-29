@@ -30,6 +30,34 @@ python3 scripts/p1_latency.py   # writes results/p1_latency.json
 python3 -m pytest tests/ -q     # 18 tests, includes e2e pipeline timing sanity
 ```
 
+## P3 correlation (measured 2026-09-29)
+
+Estimator timings (6000 daily obs, 3 assets, CPython):
+
+| Function | Wall |
+|---|---|
+| `rolling_pearson(returns, window=252)` → 5751 matrices | 219 ms |
+| `ewma_corr(returns)` (Python loop over obs) | 30.0 ms |
+| `nearest_psd` (3×3) | 67.5 µs |
+| 4× `shock_corr` (3×3) | 206 µs |
+
+Stress reprice: 3-asset basket-average snowball, 40k QMC paths, no Greeks,
+per scenario ≈ **13.1 s** (5 scenarios ≈ 66 s wall). The 8k-path test config
+(`tests/test_correlation.py`) runs the base + 2-scenario table in ~15 s.
+
+Measured sensitivity (base ρ=0.5, 40k QMC, SE ≈ 5.8 bps — signal ≫ noise):
+
+| scenario | ρ off-diag | Δprice (bps of notional) | ΔKO (pp) |
+|---|---|---|---|
+| plus_0.2 | 0.700 | −47.8 | −0.61 |
+| minus_0.2 | 0.300 | +54.6 | +0.71 |
+| crisis_1.0 | 0.950 | −91.9 | −1.02 |
+| dispersion_0.0 | 0.050 | +142.0 | +1.64 |
+
+Headline: ±0.2 ρ moves the basket-average snowball by ~55 bps; extreme
+scenarios by ≤142 bps. Correlation is a second-order driver here —
+an order of magnitude below ε_stale (0.39–0.58%).
+
 ## Notes / known noise
 
 - p99 fast-path includes GC / scheduling jitter of the shared VM; the max

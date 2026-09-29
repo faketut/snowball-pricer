@@ -170,7 +170,59 @@ select the continuous-touch variant), compute_greeks, delta_bump.
   (bridges-off vega −0.203%/pt vs P0 −0.195%/pt).
 - Convergence: SE(20k)/SE(80k) ∈ [1.6, 2.4] (≈2.0 expected).
 
-## 4. Error budget (acceptance criteria)
+## 4. Correlation contracts (P3 — implemented 2026-09-29)
+
+### 4.1 Estimators (`snowball_pricer/correlation/estimate.py`)
+
+| Function | Input | Output |
+|---|---|---|
+| `rolling_pearson(returns, window)` | `returns`: (n_obs, n_assets) log returns | ndarray (n_obs−window+1, n, n); `[t]` uses `returns[t:t+window]`; zero-variance assets yield 0 off-diagonal (never NaN); unit diagonal |
+| `ewma_corr(returns, lam=0.94)` | same + decay `lam ∈ (0,1)` | (n, n) RiskMetrics correlation; warm start = sample second moment of first 10 obs; output passes `nearest_psd` |
+| `implied_correlation(index_var, comp_vars, weights)` | index implied variance, per-component implied variances, weights | float: average pairwise implied ρ = (σ_I² − Σwᵢ²σᵢ²) / (Σ_{i≠j}wᵢwⱼσᵢσⱼ); clipped to [−0.99, 0.99] |
+| `nearest_psd(a, eps=1e-8)` | square (n, n) array | nearest PSD correlation matrix: symmetrize → clip eigenvalues ≥ eps → rescale diagonal to 1; idempotent on valid input |
+
+`implied_correlation` assumptions (not hidden): single average ρ for all
+pairs; no idiosyncratic basis (index variance fully explained by
+components); same-tenor/same-convention implied variances. An extreme
+print (|ρ̂| near the clip bound) signals model violation — use as a stress
+anchor, not a calibration (see docs/p3_design.md).
+
+### 4.2 Stress scenarios (`snowball_pricer/correlation/stress.py`)
+
+`shock_corr(corr, scenario)` shocks the off-diagonal only (diagonal stays
+1.0), clips to [−0.99, 0.99], and PSD-repairs. Scenarios:
+
+- `"plus_0.2"` / `"minus_0.2"`: ρ → ρ ± 0.2 (mild diversification-premium move)
+- `"crisis_1.0"`: ρ → 0.95 (correlation spike; 0.95 not 1.0 to keep Cholesky non-singular)
+- `"dispersion_0.0"`: ρ → 0.05 (dispersion / decorrelated regime)
+
+Unknown scenario → `ValueError`.
+
+### 4.3 Sensitivity table (`sensitivity_table`)
+
+`SCENARIOS = ("plus_0.2", "minus_0.2", "crisis_1.0", "dispersion_0.0")`.
+`sensitivity_table(base_corr, scenarios=SCENARIOS, vol, weights, cfg)`:
+reprices the reference 3-asset basket-average snowball
+(TermSheet defaults, FlatVol surface, default 40k QMC paths, no Greeks,
+fixed seed) under base + each scenario with the **same engine seed**
+(CRN deltas, not MC noise). Returns `ScenarioRow` list, base first:
+`(scenario, rho_offdiag, price, std_error, delta_price_bps,
+ko_prob, delta_ko_pp, seconds)`.
+
+### 4.4 P3 acceptance (met 2026-09-29)
+
+- 11/11 new pytest green (45 total with P1+P2 suite).
+- Estimators recover synthetic ρ=0.6: rolling Pearson and EWMA
+  (lam=0.995) within 0.05; default lam=0.94 within 0.15 (documented
+  endpoint-estimator variance, see docs/p3_design.md).
+- Implied correlation recovers ρ=0.6 on synthetic index-with-no-basis
+  data within 0.01.
+- Measured sensitivity (40k QMC, base ρ=0.5): ±0.2 ρ → ~55 bps price
+  (|Δ| < 150 bps asserted, ~3× margin); crisis/dispersion extremes
+  ≤ 142 bps. Basket variance provably monotonic in ρ. **No direction
+  asserted**: KO/KI channels oppose; the sign is term-sheet-dependent.
+
+## 5. Error budget (acceptance criteria)
 
 | Class | Target | P0 measured | Gate |
 |---|---|---|---|
@@ -179,7 +231,7 @@ select the continuous-touch variant), compute_greeks, delta_bump.
 | barrier discretization | reported | −0.3 bps this contract; BGK residual −0.0 bps | P0 ✅ (machinery validated) |
 | ε_model vs dealer quote | < 2% (1% stretch) | n/a | P4 replay |
 
-## 5. Non-goals / constraints
+## 6. Non-goals / constraints
 
 - **Not** a latency system: ms–s pricing cadence is fine; no ns tail-latency
   requirement (explicitly out of scope — that is Legos' problem, a separate repo).
