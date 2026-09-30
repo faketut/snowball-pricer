@@ -35,7 +35,8 @@ from .surface import (
     ssvi_phi,
     ssvi_total_var,
 )
-from .tick import BrokerWsFeed, Feed, OptionQuote, SyntheticTickFeed
+from .tick import Feed, OptionQuote, SyntheticTickFeed
+from .feeds import QuestradeFeed
 from .validation import (
     HedgeResult,
     Regime,
@@ -48,7 +49,6 @@ from .validation import (
 
 __all__ = [
     "ArbitrageViolation",
-    "BrokerWsFeed",
     "DegenerateQuoteError",
     "Feed",
     "HedgeResult",
@@ -56,6 +56,7 @@ __all__ = [
     "NoConvergenceError",
     "OptionQuote",
     "QuoteStore",
+    "QuestradeFeed",
     "Regime",
     "RegimeTickFeed",
     "ReplayResult",

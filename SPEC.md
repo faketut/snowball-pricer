@@ -41,6 +41,7 @@ Unless a term sheet overrides, the reference contract priced by this project is:
 | `underlying_price` | float | spot S at `ts` |
 | `rate` | float | cont-compounded risk-free r |
 | `div_yield` | float | cont-compounded dividend yield q |
+| `is_delayed` | bool | True when the venue flagged delayed data (default False) |
 
 Derived: `mid`, `spread`, `key()` = `(underlying_id, expiry, strike, is_call)`,
 `discount()`, `forward_spot()` (fallback forward).
@@ -51,11 +52,20 @@ Derived: `mid`, `spread`, `key()` = `(underlying_id, expiry, strike, is_call)`,
 - `SyntheticTickFeed`: validation backbone — quotes from a known ground-truth
   SSVI surface + microstructure noise (spread = max(tick, spread_bps·mid),
   iid Gaussian mid noise, deterministic per seed). **No broker is connected.**
-- `BrokerWsFeed`: explicit stub (raises `NotImplementedError`). The adapter
-  contract is documented in its docstring: approved-flow credentials only,
-  exchange-ts normalization, heartbeat/sequence-gap health, reconnect with
-  backoff + full snapshot resync, raw bid/ask forwarded (no mid fabrication).
-  **Open: broker venue choice (MiniQMT / QMT / 恒生 / vendor) — needed from Jian.**
+- `BrokerWsFeed` (P1 stub, raised `NotImplementedError`) is **retired** as of
+  2026-09-30 and replaced by the real adapter `QuestradeFeed`
+  (`snowball_pricer/feeds/questrade.py`) — **Questrade is the selected venue**.
+  OAuth2 refresh-token auth (token from `QUESTRADE_REFRESH_TOKEN` env only,
+  never logged/written), REST for symbol search + option chains + snapshots,
+  WebSocket L1 streaming for quotes, reconnect with exponential backoff and
+  universe re-resolve, `is_delayed` flag from the stream's `delay` field
+  (US options L1 streaming needs the $9.95 CAD/mo package). The adapter
+  contract from the old stub docstring is preserved: approved-flow
+  credentials only, exchange/receive-ts normalization, heartbeat via
+  `FeedHealth.last_msg_ts` (P5 STALENESS hook), reconnect with backoff,
+  raw bid/ask forwarded (no mid fabrication), rate-limit pacing + 429
+  backoff. Documented alternatives (not implemented): moomoo OpenAPI,
+  IBKR TWS/Gateway. Setup: `docs/questrade_setup.md`.
 
 ### 2.3 IV inversion (`snowball_pricer/iv.py`)
 

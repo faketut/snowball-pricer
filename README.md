@@ -29,9 +29,10 @@ broker WebSocket ticks -> IV inversion -> arbitrage-free SSVI surface
 | **P0** | Define X: quantify the three error classes on a simplified snowball | ✅ done (`scripts/p0_error_scaling.py`, `docs/error_budget.md`) |
 | **P1** | Data pipeline: WS tick ingest → per-quote IV inversion → SSVI arbitrage-free surface → versioned snapshot publish | ✅ done (`snowball_pricer/`, `tests/`, `docs/p1_design.md`, `PERF.md`) |
 | **P2** | Pricing engine: Dupire local vol + Brownian bridge + Sobol QMC; CRN Greeks (AAD deferred, documented) | ✅ done 2026-09-29 |
-| **P3** | Correlation module (basket / worst-of) + stress scenarios | planned |
-| **P4** | Historical replay validation: rebuild past surfaces from tick history, hedge-simulation P&L explain | planned |
-| **P5** | Real-time loop + monitoring (surface arbitrage alerts, Greeks drift alerts) | planned |
+| **P3** | Correlation module (basket-average linkage) + stress scenarios | ✅ done 2026-09-29 (`docs/p3_design.md`) |
+| **P4** | Historical replay validation: rebuild past surfaces from tick history, hedge-simulation P&L explain | ✅ done 2026-09-29 (`docs/p4_report.md`) |
+| **P5** | Real-time loop + monitoring (surface arbitrage alerts, Greeks drift alerts) | ✅ done 2026-09-30 (`scripts/live_loop.py`, `docs/p5_report.md`, `PERF.md`) |
+| **P6** | Live broker feed: Questrade adapter (OAuth2 + WS L1 streaming) replacing the `BrokerWsFeed` stub | ✅ done 2026-09-30 (`snowball_pricer/feeds/questrade.py`, `docs/questrade_setup.md`) |
 
 ## Error budget (targets)
 

@@ -5,6 +5,9 @@ Contracts (see SPEC.md section 2):
   (synthetic, broker WS, CSV replay) must emit it.
 - ``Feed.subscribe()`` yields an unbounded iterator of quotes; the caller
   drives pacing (no hidden threads inside feeds).
+
+The production broker adapter lives in ``snowball_pricer.feeds``
+(``QuestradeFeed``); this module keeps only the schema and the interface.
 """
 from __future__ import annotations
 
@@ -34,6 +37,8 @@ class OptionQuote:
     underlying_price: float  # spot S observed at ts
     rate: float              # continuously-compounded risk-free rate r
     div_yield: float         # continuously-compounded dividend yield q
+    is_delayed: bool = False  # True when the venue flagged delayed data
+                              # (Questrade: no real-time package subscribed)
 
     @property
     def mid(self) -> float:
@@ -188,44 +193,7 @@ class SyntheticTickFeed(Feed):
             )
 
 
-class BrokerWsFeed(Feed):
-    """STUB — adapter contract for a real broker WebSocket feed.
-
-    This class documents what a production broker adapter must provide. It
-    is intentionally not implemented: a fake "works without a broker"
-    implementation would be worse than an explicit stub, because downstream
-    code could silently consume fabricated market data.
-
-    Required behavior of a real implementation
-    ------------------------------------------
-    1. ``connect(url, auth)`` — credentials come from the approved connection
-       flow only; never from chat, env files, or in-repo config (SPEC.md §5).
-    2. ``subscribe(symbols)`` — translate broker symbology to
-       ``(underlying_id, expiry, strike, call/put)`` and emit ``OptionQuote``
-       with the broker's exchange timestamp in ``ts``.
-    3. Heartbeat / sequence-gap detection: any gap or stall > threshold must
-       surface as a feed-health event (the surface builder must know when its
-       input went stale — see docs/p1_design.md "what breaks first").
-    4. Reconnect with exponential backoff; on reconnect, re-request a full
-       quote snapshot before resuming incremental updates.
-    5. Normalize to this schema: mids are NOT constructed here — always
-       forward raw bid/ask so the inverter sees the true spread.
-    6. Respect the broker's subscription and throughput rate limits.
-
-    Open question for Jian: which broker (MiniQMT / QMT / 恒生 / vendor)?
-    The adapter cannot be written until the venue is chosen.
-    """
-
-    def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-        raise NotImplementedError(
-            "BrokerWsFeed is a stub: no broker is connected. "
-            "Implement the adapter per the contract in the class docstring "
-            "once the venue is chosen."
-        )
-
-    def subscribe(
-        self, symbols: Optional[Sequence[str]] = None
-    ) -> Iterator[OptionQuote]:
-        raise NotImplementedError(
-            "BrokerWsFeed is a stub: no broker is connected."
-        )
+# NOTE: the P1 ``BrokerWsFeed`` stub was removed on 2026-09-30 and replaced
+# by the real Questrade adapter in ``snowball_pricer.feeds`` (``QuestradeFeed``).
+# It raised NotImplementedError by design; nothing in the test suite or the
+# pipeline referenced it beyond the import, so removal is safe.

@@ -1,6 +1,11 @@
-"""P5 real-time closed loop: synthetic feed -> pipeline -> vectorized reprice -> monitor.
+"""P5 real-time closed loop: feed -> pipeline -> vectorized reprice -> monitor.
 
-Loop (all synthetic, unattended):
+Two feed modes (``--feed``): ``synthetic`` (default, RegimeTickFeed — the
+P5 validation loop) and ``questrade`` (live Questrade L1 option quotes via
+``snowball_pricer.feeds.QuestradeFeed``; needs QUESTRADE_REFRESH_TOKEN and
+--max-ticks to bound the unbounded stream).
+
+Loop (synthetic mode, unattended):
 
     RegimeTickFeed (3 regimes: calm / stress / calm)
         -> QuoteStore.update per tick (fast path)
@@ -51,6 +56,11 @@ from snowball_pricer.pricing.payoff import TermSheet, UnderlyingSpec
 from snowball_pricer.snapshot import SnapshotStore
 from snowball_pricer.validation.replay import Regime, RegimeTickFeed
 
+try:
+    from snowball_pricer.feeds import QuestradeFeed
+except ImportError:  # pragma: no cover - websocket-client not installed
+    QuestradeFeed = None
+
 TRUTH = dict(thetas=[0.0121, 0.0200, 0.0361, 0.0648],
              expiries=[0.25, 0.5, 1.0, 2.0], rho=-0.45, eta=0.8, gamma=0.5)
 RATE, DIV, SPOT0 = 0.03, 0.01, 100.0
@@ -81,23 +91,56 @@ def main() -> None:
     ap.add_argument("--rebuild-every", type=int, default=SWEEP)
     ap.add_argument("--greeks-every", type=int, default=5)
     ap.add_argument("--out", default="results/p5_live.json")
+    ap.add_argument("--feed", choices=["synthetic", "questrade"],
+                    default="synthetic",
+                    help="tick source: synthetic regime feed (default) or "
+                         "live Questrade adapter (needs QUESTRADE_REFRESH_TOKEN)")
+    ap.add_argument("--underlyings", default="SPY",
+                    help="comma-separated underlyings for --feed questrade")
+    ap.add_argument("--max-ticks", type=int, default=0,
+                    help="stop after N ticks (required>0 for questrade mode; "
+                         "synthetic mode ends on its own)")
+    ap.add_argument("--rate", type=float, default=RATE,
+                    help="risk-free rate for questrade mode")
+    ap.add_argument("--div", type=float, default=0.0,
+                    help="dividend yield for questrade mode")
     args = ap.parse_args()
 
-    feed = build_feed(args.sim_seconds, args.seed)
-    n_ticks = feed.total_ticks
+    if args.feed == "questrade":
+        if QuestradeFeed is None:
+            ap.error("--feed questrade needs websocket-client "
+                     "(pip install -r requirements.txt)")
+        if args.max_ticks <= 0:
+            ap.error("--feed questrade requires --max-ticks > 0")
+        underlyings = [u.strip().upper()
+                       for u in args.underlyings.split(",") if u.strip()]
+        feed = QuestradeFeed(underlyings, rate=args.rate,
+                             div_yield=args.div)
+        specs = [UnderlyingSpec(name=u, weight=1.0 / len(underlyings))
+                 for u in underlyings]
+        n_ticks = args.max_ticks
+        feed_health = feed.health
+    else:
+        feed = build_feed(args.sim_seconds, args.seed)
+        n_ticks = feed.total_ticks
+        specs = [UnderlyingSpec(name="SYN", weight=1.0)]
+        feed_health = None
     store, snapshots = QuoteStore(), SnapshotStore()
     monitor = Monitor(MonitorConfig())
     terms = TermSheet()
-    specs = [UnderlyingSpec(name="SYN", weight=1.0)]
 
     # Fault plan: one ATM-ish strike (middle of the k-grid) across all
     # expiries, call+put, crossed for two full sweeps starting mid-run.
-    k_grid = list(np.linspace(-0.45, 0.25, 15))
-    k_mid = k_grid[len(k_grid) // 2]
-    target_strikes = {T: SPOT0 * math.exp((RATE - DIV) * T) * math.exp(k_mid)
-                      for T in TRUTH["expiries"]}
-    fault_start = n_ticks // 2
-    fault_end = fault_start + 2 * SWEEP if args.inject_fault else -1
+    # Synthetic mode only — the live feed carries real quotes.
+    fault_start, fault_end = -1, -1
+    target_strikes = {}
+    if args.feed == "synthetic":
+        k_grid = list(np.linspace(-0.45, 0.25, 15))
+        k_mid = k_grid[len(k_grid) // 2]
+        target_strikes = {T: SPOT0 * math.exp((RATE - DIV) * T) * math.exp(k_mid)
+                          for T in TRUTH["expiries"]}
+        fault_start = n_ticks // 2
+        fault_end = fault_start + 2 * SWEEP if args.inject_fault else -1
 
     stats = {"ticks": 0, "dropped": 0, "fault_dropped": 0, "rebuilds": 0,
              "rebuild_failures": 0, "published_versions": [], "reprices": 0,
@@ -115,6 +158,8 @@ def main() -> None:
             break
         tick += 1
         stats["ticks"] += 1
+        if args.max_ticks and tick >= args.max_ticks:
+            break  # questrade mode is unbounded; stop on the tick budget
         faulted = False
         if fault_start <= tick <= fault_end and abs(
                 q.strike - target_strikes[q.expiry]) < 1e-9:
@@ -172,7 +217,9 @@ def main() -> None:
                            else "DID NOT FIRE (unexpected)")
 
     results = {
-        "config": {"sim_seconds": args.sim_seconds,
+        "config": {"feed": args.feed,
+                   "underlyings": getattr(args, "underlyings", None),
+                   "sim_seconds": args.sim_seconds,
                    "inject_fault": args.inject_fault, "seed": args.seed,
                    "n_paths": args.n_paths,
                    "rebuild_every": args.rebuild_every,
@@ -214,6 +261,8 @@ def main() -> None:
     for a in monitor.alerts:
         print(f"  [{a.kind}/{a.severity}] {a.message}")
     print(f"staleness self-test: {staleness_self_test}")
+    if feed_health is not None:
+        print(f"questrade feed health: {feed_health.as_dict()}")
     print(f"results -> {args.out}")
 
 
