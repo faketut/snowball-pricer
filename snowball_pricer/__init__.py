@@ -36,16 +36,29 @@ from .surface import (
     ssvi_total_var,
 )
 from .tick import BrokerWsFeed, Feed, OptionQuote, SyntheticTickFeed
+from .validation import (
+    HedgeResult,
+    Regime,
+    RegimeTickFeed,
+    ReplayResult,
+    pnl_explain,
+    run_replay,
+    simulate_hedge,
+)
 
 __all__ = [
     "ArbitrageViolation",
     "BrokerWsFeed",
     "DegenerateQuoteError",
     "Feed",
+    "HedgeResult",
     "IVError",
     "NoConvergenceError",
     "OptionQuote",
     "QuoteStore",
+    "Regime",
+    "RegimeTickFeed",
+    "ReplayResult",
     "SnapshotStore",
     "StaleSnapshotError",
     "VolSurface",
@@ -64,9 +77,12 @@ __all__ = [
     "implied_vol",
     "implied_vol_safe",
     "pava_isotonic",
+    "pnl_explain",
     "raw_svi_total_var",
     "rebuild_surface",
     "run_pipeline",
+    "run_replay",
+    "simulate_hedge",
     "ssvi_phi",
     "ssvi_total_var",
     "SyntheticTickFeed",

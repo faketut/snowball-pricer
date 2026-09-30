@@ -137,14 +137,25 @@ def _price_core(snapshot, terms: TermSheet, resolved: _ResolvedMarket,
 
 def price(snapshot, terms: TermSheet, underlyings: List[UnderlyingSpec],
           cfg: EngineConfig = EngineConfig(),
-          corr: Optional[np.ndarray] = None) -> PriceResult:
-    """Price a basket-average snowball from a P1 surface snapshot."""
+          corr: Optional[np.ndarray] = None,
+          norm_spots: Optional[np.ndarray] = None) -> PriceResult:
+    """Price a basket-average snowball from a P1 surface snapshot.
+
+    ``norm_spots``: absolute spots used to normalize basket performance
+    (default None -> the market's own spots, i.e. a freshly-struck contract
+    with B(0) = 1). Pass the ORIGINAL trade-date spots to price a SEASONED
+    position: barriers then stay fixed in absolute terms while the simulated
+    spot moves (this is the hedge delta / P&L-explain convention; see
+    SPEC.md section 7).
+    """
     t0 = time.perf_counter()
     resolved = _resolve_market(snapshot, underlyings, terms.tenor_years)
     if corr is not None:
         resolved = set_correlation(resolved, corr)
+    norm = None if norm_spots is None else np.asarray(norm_spots, dtype=float)
 
-    core = _price_core(snapshot, terms, resolved, cfg, cfg.seed)
+    core = _price_core(snapshot, terms, resolved, cfg, cfg.seed,
+                       norm_spots=norm)
 
     delta: Dict[str, float] = {}
     vega = float("nan")
@@ -152,14 +163,18 @@ def price(snapshot, terms: TermSheet, underlyings: List[UnderlyingSpec],
     if cfg.compute_greeks:
         t1 = time.perf_counter()
         base_spots = resolved.market.spots.copy()
+        # CRN delta: barriers fixed in absolute terms. With norm_spots
+        # given (seasoned), they are already absolute; otherwise the base
+        # spots play that role (fresh-contract convention).
+        bump_norm = base_spots if norm is None else norm
 
         def reprice(specs):
             # CRN delta: same draws, barriers fixed in absolute terms via
-            # norm_spots=base spots (see payoff.evaluate_snowball).
+            # norm_spots (see payoff.evaluate_snowball).
             r = _ResolvedMarket(market=_replace_specs(resolved, specs),
                                 specs=specs)
             c = _price_core(snapshot, terms, r, cfg, cfg.seed,
-                            norm_spots=base_spots)
+                            norm_spots=bump_norm)
             return c["price"], c["std_error"]
 
         delta = delta_crn(reprice, resolved.specs, core["price"],
@@ -170,7 +185,8 @@ def price(snapshot, terms: TermSheet, underlyings: List[UnderlyingSpec],
         rb = _resolve_market(bumped_snap, underlyings, terms.tenor_years)
         if corr is not None:
             rb = set_correlation(rb, corr)
-        vb = _price_core(bumped_snap, terms, rb, cfg, cfg.seed)
+        vb = _price_core(bumped_snap, terms, rb, cfg, cfg.seed,
+                         norm_spots=norm)
         vega = float(vb["price"] - core["price"])  # per 1 vol point
         greek_s = time.perf_counter() - t1
 

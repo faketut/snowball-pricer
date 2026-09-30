@@ -100,3 +100,21 @@ step loop is the obvious next step if reprice frequency demands it.
 python3 scripts/p2_benchmark.py
 python3 -m pytest tests/test_pricing.py -q   # 16 P2 tests
 ```
+
+## P4 — historical replay validation (2026-09-29, this VM)
+
+Canonical run: 14 trading days (5 calm / 5 vol-spike / 4 calm), 14
+snapshots x 20,000 QMC paths with Greeks, seed 20260929
+(`python3 scripts/p4_replay.py`; full numbers in `docs/p4_report.md`).
+
+| stage | measured |
+|-------|----------|
+| Replay: P1 pipeline rebuild + P2 reprice, 14 snapshots x 20k QMC (Greeks on) | 96 s (~6.9 s / snapshot) |
+| Hedge simulation (14 true-path days) | < 0.1 s |
+| P&L explain: 13 frozen-market theta reprices x 20k QMC (no Greeks) | 44 s (~3.4 s / reprice) |
+| **Total** | **140 s** |
+
+Notes: Greeks roughly double the per-snapshot cost vs a price-only reprice
+(compare ~3.4 s / 20k-path reprice without Greeks). The theta explain is
+embarrassingly parallel across snapshot-days — halving wall-clock is one
+`multiprocessing` pool away if P5's real-time loop needs it.

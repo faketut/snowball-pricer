@@ -239,3 +239,94 @@ ko_prob, delta_ko_pp, seconds)`.
   execution stack, not here).
 - No retail broker API keys in-repo; credentials via the approved connection
   flow only.
+
+
+## 7. Historical replay validation (P4 — implemented 2026-09-29)
+
+The "is the model honest" gate: replay a synthetic multi-regime history
+through the REAL P1 pipeline, reprice every snapshot with the REAL P2
+engine, delta-hedge the short position along the TRUE spot path, and
+attribute the realized P&L. See `docs/p4_report.md` for the measured
+numbers and the honest residual discussion.
+
+### 7.1 Regime feed (`snowball_pricer/validation/replay.py`)
+
+`RegimeTickFeed(Feed)`: piecewise-constant SSVI ground truth. Regimes are
+`(n_ticks, atm_vol, spot_vol)` — `atm_vol` is the ABSOLUTE target ATM vol
+at the reporting tenor (`atm_iv_tenor`, default 1Y — the same tenor
+`run_replay` reports `atm_iv` at; base thetas scaled by
+`(atm_vol/base_atm_1Y)^2` so the configured regime level matches the
+measured 1Y ATM); `spot_vol` is the absolute GBM vol of the spot path. Quote generation reuses P1's math
+(`iv.black_price` + spread/noise); `underlying_price` = current regime
+spot. Deterministic given seed (spot stream `seed`, quote-noise stream
+`seed + 7919`).
+
+Two realism fixes made during P4 (documented, not hidden):
+- Spot is constant within a sweep (one sweep = one trading day) and GBM
+  across days. Per-tick spot movement smeared the smile inversion (the P1
+  builder uses one forward per expiry); daily-constant spot keeps each
+  snapshot's calibration as clean as P1's static case (recovered ATM vol
+  within 0.1 vol pt of target, RMSE ≤ 0.01).
+- The strike grid is FIXED for the whole replay (listed-style), centered
+  on the day-0 forward. A per-day re-centered grid accumulated stale
+  strikes in the pipeline's latest-per-key `QuoteStore` and biased the
+  spike-regime calibration down by ~40%.
+
+`run_replay(feed, terms, engine_cfg, underlyings, *, norm_spots=None)` →
+`ReplayResult(rows, true_spots, snapshots, terms, underlyings, norm_spots,
+engine_cfg, feed_spec)`:
+drives the feed through the real `run_pipeline` (default cadence: one
+sweep = one snapshot/day), reprices each published snapshot with
+`engine.price` at the day's true close spot with an AGING tenor
+(`tenor − day/252`, so the attribution sees genuine theta). The engine
+seed is fixed across snapshots: day-to-day price moves are pure
+market/surface effects, not MC resampling. `run_replay` takes
+`norm_spots` (the trade-date spots): the canonical replay prices a
+SEASONED position — barriers fixed in absolute terms at the day-0 spot.
+A daily-rolled fresh contract would sit exactly at its KO barrier every
+day (B(0) = 1 = ko_barrier by construction) and its delta would be
+degenerate ≈ 0; the hedge's KO/KI checks use the same absolute barriers,
+so pricing and hedging agree on the contract. Row:
+`{day, ts, spot, tenor_years, surface_version, price, std_error, delta,
+vega, ko_prob, atm_iv}` (`delta`/`vega` are the LONG product's).
+
+### 7.2 Hedge + P&L explain (`snowball_pricer/validation/hedge.py`)
+
+`simulate_hedge(rows, true_spots, terms, rate, notional=1.0)`:
+delta-hedges a SHORT snowball. Sign convention: rows carry LONG delta
+(> 0); the short's position delta is its negative, so the hedge holds
+`shares = +delta_long × notional` (i.e. `hedge = −delta_short × notional`).
+t0: receive premium, buy hedge. Daily: accrue cash at `rate`, check KO
+observations on the true path (every `ko_obs_every_days` days, basket vs
+`ko_barrier` → redeem `1 + coupon·t`, flatten), else rebalance to the
+latest row delta (held between reprices). No KO: flatten + buy back at the
+last model price at the end of the true path. Maturity economics (true-path
+KI monitoring) implemented; the canonical 14-day replay never reaches it.
+Internal identity `premium − final + stock + interest == realized` is
+asserted in code.
+
+`pnl_explain(replay, hedge, theta_cfg)`: SHORT-perspective attribution in
+bps of notional, over the held day-to-day transitions —
+- **delta**: Σ (h_d − delta_long_d)·dS_d — NET delta (hedge leg minus the
+  position's model delta leg); ≈ 0 when the daily hedge tracks the model
+  delta, nonzero from discrete/stale hedging;
+- **vega**: Σ (−vega_long_d)·dATMiv_d (ATM iv from each snapshot's surface
+  at a fixed tenor; vega is the engine's parallel +1pt bump, so this is an
+  ATM-only approximation — named as such);
+- **carry**: frozen-market model theta per snapshot (repriced at
+  `tenor − 1 day`, same surface/spot/seed) with SHORT sign, plus hedge cash
+  interest;
+- **residual** = actual − (delta + vega + carry), by construction. It holds
+  everything first-order misses: gamma (no gamma in the engine), discrete
+  daily rebalancing, the vega ATM-only approximation, QMC noise in Greeks,
+  surface recalibration noise, theta finite-difference noise.
+
+### 7.3 P4 acceptance (met 2026-09-29)
+
+- `python3 scripts/p4_replay.py` runs unattended → `results/p4_replay.json`
+  + stdout summary table.
+- 5 new pytest green (50 total with P1–P3 suite): replay completes with
+  monotonic finite rows; hedge accounting identity exact; determinism
+  (same seed → identical P&L table); autocall termination unit-tested;
+  maturity payoff unit-tested.
+- Measured attribution in `docs/p4_report.md` (not asserted — reported).
