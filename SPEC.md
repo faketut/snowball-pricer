@@ -66,6 +66,14 @@ Derived: `mid`, `spread`, `key()` = `(underlying_id, expiry, strike, is_call)`,
   raw bid/ask forwarded (no mid fabrication), rate-limit pacing + 429
   backoff. Documented alternatives (not implemented): moomoo OpenAPI,
   IBKR TWS/Gateway. Setup: `docs/questrade_setup.md`.
+- `YFinancePollFeed` (`snowball_pricer/feeds/yfinance.py`, Phase 1.5
+  stepping stone, 2026-09-30): polls Yahoo option chains on a configurable
+  cadence. **ALWAYS 15-minutes delayed — every quote has `is_delayed=True`
+  hardcoded; never present it as real-time.** Missing bid/ask are emitted
+  as None (never fabricated); each poll cycle is stamped with a cycle_id
+  in `feed.cycle_stats`; errors/429s skip the cycle with backoff and never
+  crash the loop. Quality baseline: `docs/yfinance_notes.md`
+  (+ `results/yfinance_quality.json`, gitignored).
 
 ### 2.3 IV inversion (`snowball_pricer/iv.py`)
 

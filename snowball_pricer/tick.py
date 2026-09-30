@@ -55,7 +55,15 @@ class OptionQuote:
     def is_valid(self) -> bool:
         """Structural validity. Crossed (bid > ask) or non-positive quotes
         are rejected here; near-degenerate but valid quotes are left for
-        the IV inverter to accept or refuse."""
+        the IV inverter to accept or refuse.
+
+        Missing quotes (bid/ask None or NaN — e.g. yfinance rows with no
+        published quote) are invalid, never fabricated. ``mid``/``spread``
+        must only be called on valid quotes.
+        """
+        for v in (self.bid, self.ask):
+            if v is None or v != v:  # None or NaN
+                return False
         return (
             self.bid > 0.0
             and self.ask >= self.bid

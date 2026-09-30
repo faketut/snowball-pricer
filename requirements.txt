@@ -2,3 +2,4 @@ numpy
 scipy
 pytest
 websocket-client  # Questrade WS streaming (feeds/questrade.py); REST stays stdlib
+yfinance  # Phase 1.5 delayed poll feed (feeds/yfinance.py); ALWAYS 15-min delayed, never real-time

@@ -1,9 +1,11 @@
 """P5 real-time closed loop: feed -> pipeline -> vectorized reprice -> monitor.
 
-Two feed modes (``--feed``): ``synthetic`` (default, RegimeTickFeed — the
-P5 validation loop) and ``questrade`` (live Questrade L1 option quotes via
+Three feed modes (``--feed``): ``synthetic`` (default, RegimeTickFeed — the
+P5 validation loop), ``questrade`` (live Questrade L1 option quotes via
 ``snowball_pricer.feeds.QuestradeFeed``; needs QUESTRADE_REFRESH_TOKEN and
---max-ticks to bound the unbounded stream).
+--max-ticks to bound the unbounded stream), and ``yfinance`` (15-MINUTES
+DELAYED Yahoo poll feed via ``snowball_pricer.feeds.YFinancePollFeed`` —
+NOT real-time; every tick is_delayed=True).
 
 Loop (synthetic mode, unattended):
 
@@ -61,6 +63,11 @@ try:
 except ImportError:  # pragma: no cover - websocket-client not installed
     QuestradeFeed = None
 
+try:
+    from snowball_pricer.feeds import YFinancePollFeed
+except ImportError:  # pragma: no cover - yfinance not installed
+    YFinancePollFeed = None
+
 TRUTH = dict(thetas=[0.0121, 0.0200, 0.0361, 0.0648],
              expiries=[0.25, 0.5, 1.0, 2.0], rho=-0.45, eta=0.8, gamma=0.5)
 RATE, DIV, SPOT0 = 0.03, 0.01, 100.0
@@ -88,23 +95,35 @@ def main() -> None:
     ap.add_argument("--inject-fault", action="store_true")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--n-paths", type=int, default=20_000)
-    ap.add_argument("--rebuild-every", type=int, default=SWEEP)
+    ap.add_argument("--rebuild-every", type=int, default=0,
+                    help="ticks between surface rebuilds (default per feed: "
+                         "synthetic/questrade=SWEEP, yfinance=1000)")
+    ap.add_argument("--poll-interval", type=float, default=180.0,
+                    help="yfinance poll cadence in seconds (default 180; "
+                         "Yahoo throttles aggressively, do not go low)")
     ap.add_argument("--greeks-every", type=int, default=5)
     ap.add_argument("--out", default="results/p5_live.json")
-    ap.add_argument("--feed", choices=["synthetic", "questrade"],
+    ap.add_argument("--feed", choices=["synthetic", "questrade", "yfinance"],
                     default="synthetic",
-                    help="tick source: synthetic regime feed (default) or "
-                         "live Questrade adapter (needs QUESTRADE_REFRESH_TOKEN)")
+                    help="tick source: synthetic regime feed (default), live "
+                         "Questrade adapter (needs QUESTRADE_REFRESH_TOKEN), "
+                         "or yfinance 15-MIN-DELAYED poll feed (NOT real-time)")
     ap.add_argument("--underlyings", default="SPY",
-                    help="comma-separated underlyings for --feed questrade")
+                    help="comma-separated underlyings for --feed "
+                         "questrade/yfinance")
     ap.add_argument("--max-ticks", type=int, default=0,
-                    help="stop after N ticks (required>0 for questrade mode; "
-                         "synthetic mode ends on its own)")
+                    help="stop after N ticks (required>0 for questrade and "
+                         "yfinance modes; synthetic mode ends on its own)")
     ap.add_argument("--rate", type=float, default=RATE,
                     help="risk-free rate for questrade mode")
     ap.add_argument("--div", type=float, default=0.0,
                     help="dividend yield for questrade mode")
     args = ap.parse_args()
+
+    underlyings = [u.strip().upper()
+                   for u in args.underlyings.split(",") if u.strip()]
+    if args.rebuild_every <= 0:
+        args.rebuild_every = 1000 if args.feed == "yfinance" else SWEEP
 
     if args.feed == "questrade":
         if QuestradeFeed is None:
@@ -112,14 +131,29 @@ def main() -> None:
                      "(pip install -r requirements.txt)")
         if args.max_ticks <= 0:
             ap.error("--feed questrade requires --max-ticks > 0")
-        underlyings = [u.strip().upper()
-                       for u in args.underlyings.split(",") if u.strip()]
         feed = QuestradeFeed(underlyings, rate=args.rate,
                              div_yield=args.div)
         specs = [UnderlyingSpec(name=u, weight=1.0 / len(underlyings))
                  for u in underlyings]
         n_ticks = args.max_ticks
         feed_health = feed.health
+    elif args.feed == "yfinance":
+        if YFinancePollFeed is None:
+            ap.error("--feed yfinance needs yfinance "
+                     "(pip install -r requirements.txt)")
+        if args.max_ticks <= 0:
+            ap.error("--feed yfinance requires --max-ticks > 0 "
+                     "(the poll feed is unbounded)")
+        print("NOTE: --feed yfinance is 15-MINUTES DELAYED market data, "
+              "not real-time. Every tick is flagged is_delayed=True.",
+              flush=True)
+        feed = YFinancePollFeed(underlyings, rate=args.rate,
+                                div_yield=args.div,
+                                poll_interval_s=args.poll_interval)
+        specs = [UnderlyingSpec(name=u, weight=1.0 / len(underlyings))
+                 for u in underlyings]
+        n_ticks = args.max_ticks
+        feed_health = None
     else:
         feed = build_feed(args.sim_seconds, args.seed)
         n_ticks = feed.total_ticks
