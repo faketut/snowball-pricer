@@ -259,3 +259,44 @@ class LocalVolSurface:
         v11 = v[i0 + 1, j1]
         return ((1 - fk) * (1 - fT) * v00 + fk * (1 - fT) * v10
                 + (1 - fk) * fT * v01 + fk * fT * v11)
+
+    # -- vectorized hot path (P5): T-weights precomputed once per step grid --
+    def t_weights(self, t):
+        """Bilinear T-weights for time(s) ``t``: returns ``(j0, j1, fT)``.
+
+        Vectorized over ``t``. The simulator precomputes these once per step
+        grid so the per-step query skips the ``searchsorted`` on the
+        non-uniform T grid. ``t`` is clipped to ``[t_min, t_max]`` exactly as
+        in :meth:`local_vol`.
+        """
+        T = np.asarray(t, dtype=float)
+        Tc = np.clip(T, self.t_min, self.t_max)
+        tg = self._t_grid
+        j1 = np.clip(np.searchsorted(tg, Tc, side="left"), 1, len(tg) - 1)
+        j0 = j1 - 1
+        denom = tg[j1] - tg[j0]
+        fT = np.where(denom > 0, (Tc - tg[j0]) / np.maximum(denom, 1e-300),
+                      0.0)
+        return j0, j1, fT
+
+    def local_vol_at_weights(self, k, j0, j1, fT) -> np.ndarray:
+        """Bilinear lookup with precomputed T-weights from :meth:`t_weights`.
+
+        ``k`` broadcasts against the (scalar or array) weights. Bitwise
+        identical to ``local_vol(k, t)`` for the ``t`` the weights were built
+        from: same clip, same k-indexing, same lerp op order.
+        """
+        kc = np.clip(np.asarray(k, dtype=float), self.k_min, self.k_max)
+        kg = self._k_grid
+        dk = kg[1] - kg[0]
+        fi = (kc - kg[0]) / dk
+        # fi >= 0 always (kc >= k_min), so astype(int) == floor
+        i0 = np.clip(fi.astype(int), 0, len(kg) - 2)
+        fk = fi - i0
+        v = self._vol
+        v00 = v[i0, j0]
+        v10 = v[i0 + 1, j0]
+        v01 = v[i0, j1]
+        v11 = v[i0 + 1, j1]
+        return ((1 - fk) * (1 - fT) * v00 + fk * (1 - fT) * v10
+                + (1 - fk) * fT * v01 + fk * fT * v11)

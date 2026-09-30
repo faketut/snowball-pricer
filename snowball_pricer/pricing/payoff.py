@@ -69,15 +69,31 @@ class TermSheet:
     discount_rate: Optional[float] = None  # None -> first underlying's rate
 
 
+def _basket_vol_from_perf(perf: np.ndarray, B: np.ndarray,
+                         sigma: np.ndarray, weights: np.ndarray,
+                         corr: np.ndarray) -> np.ndarray:
+    """Basket vol from precomputed performance ``perf`` and basket ``B``.
+
+    Single source of truth for the ``sqrt(y' C y)`` algebra; :func:`basket_vol`
+    and the :func:`evaluate_snowball` hot loop both funnel through here so
+    the loop does not recompute ``perf``/``B``.
+    """
+    x = (perf * weights) / B[:, None]          # basket delta weights
+    y = x * sigma
+    return np.sqrt(np.maximum(np.einsum("pj,jk,pk->p", y, corr, y), 0.0))
+
+
 def basket_vol(sigma: np.ndarray, S: np.ndarray, spots: np.ndarray,
                weights: np.ndarray, corr: np.ndarray) -> np.ndarray:
-    """Instantaneous basket vol per path. sigma, S: (n_paths, n_assets)."""
+    """Instantaneous basket vol per path. sigma, S: (n_paths, n_assets).
+
+    P5: computed as ``sqrt(y' C y)`` with ``y = x * sigma`` (no (p,a,a)
+    covariance cube materialized). Algebraically identical to the old
+    ``x' (D C D) x`` form; FP association differs at ~1e-16.
+    """
     perf = S / spots  # (p, a)
-    B = perf @ weights
-    B = np.maximum(B, 1e-300)
-    x = (perf * weights) / B[:, None]          # basket delta weights
-    cov = (sigma[:, :, None] * sigma[:, None, :]) * corr  # (p, a, a)
-    return np.sqrt(np.maximum(np.einsum("pi,pij,pj->p", x, cov, x), 0.0))
+    B = np.maximum(perf @ weights, 1e-300)
+    return _basket_vol_from_perf(perf, B, sigma, weights, corr)
 
 
 def evaluate_snowball(driver, market, terms: TermSheet,
@@ -120,10 +136,14 @@ def evaluate_snowball(driver, market, terms: TermSheet,
         # Initial local vol at t=0: the bridge corrections on the first
         # interval need a basket vol; it is NOT zero (previous version left
         # these at 0, silently disabling the correction on interval 1).
+        # P5: uses the precomputed t=0 weights (bitwise-identical lookup).
         S0_2d = np.broadcast_to(market.spots, (nb, len(market.spots))).copy()
         sigma0 = np.empty_like(S0_2d)
+        tw = driver._tw
         for a, lv in enumerate(market.lvs):
-            sigma0[:, a] = lv.local_vol(np.zeros(nb), 0.0)
+            j0, j1, fT = tw[a]
+            sigma0[:, a] = lv.local_vol_at_weights(np.zeros(nb), j0[0],
+                                                   j1[0], fT[0])
         bv0_sq = basket_vol(sigma0, S0_2d, norm, market.weights,
                             market.corr) ** 2
         B_prev = np.full(nb, B0)
@@ -136,7 +156,10 @@ def evaluate_snowball(driver, market, terms: TermSheet,
             perf = S / norm
             B = perf @ market.weights
             B = np.maximum(B, 1e-300)
-            bv = basket_vol(sigma, S, norm, market.weights, market.corr)
+            # P5: reuse perf/B for the basket vol (no recompute inside
+            # basket_vol); same numerics via _basket_vol_from_perf.
+            bv = _basket_vol_from_perf(perf, B, sigma, market.weights,
+                                       market.corr)
             bv2 = bv ** 2
 
             if ki_on:

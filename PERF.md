@@ -79,8 +79,10 @@ Workload: canonical 2Y single-asset snowball, flat 25% vol, daily steps
 
 Dupire grid build (161×61, analytic SSVI path): <0.01 s — negligible vs
 simulation. The per-step Python loop (~504 iterations of vector ops +
-bilinear local-vol lookup per asset) dominates; a numba/Rust port of the
-step loop is the obvious next step if reprice frequency demands it.
+bilinear local-vol lookup per asset) dominates; P5 vectorized the hot loop
+(~1.7x, see "P5 — MC hot-loop vectorization" below) — a numba/Rust/GPU
+port of the step loop remains the obvious next step if reprice frequency
+demands it.
 
 ### QMC vs antithetic MC
 
@@ -100,6 +102,34 @@ step loop is the obvious next step if reprice frequency demands it.
 python3 scripts/p2_benchmark.py
 python3 -m pytest tests/test_pricing.py -q   # 16 P2 tests
 ```
+
+## P5 — MC hot-loop vectorization (2026-09-29, this VM)
+
+Same canonical workload as the P2 table above; `price()` signature and all
+draws/formulas unchanged (`scripts/p2_benchmark.py` re-run 2026-09-29).
+
+| N paths | before | after | speedup | paths/sec |
+|---|---|---|---|---|
+| 100k | 13.5 s | 7.4 s | **1.82x** | 13,459 |
+| 1M | 110.2 s | 64.9 s | **1.70x** | 15,412 |
+
+Prices identical to 1e-9 (0.985909 / 0.985837). Back-to-back A/B/A/B at
+100k: old 10.4–14.5 s vs new 6.3–7.7 s → 1.6–1.9x; this VM's noisy-neighbor
+jitter is large, so the honest claim is **~1.7x**.
+
+What was attacked (cProfile): per-step `local_vol` (~33% of wall — now
+precomputed T-weights + bitwise-identical fast lerp), per-step
+`basket_vol` (no more (p,a,a) cube; `sqrt(y'Cy)`), per-step forwards
+(hoisted). Deliberately NOT changed after measurement: the Brownian
+bridge stays a scalar loop (the vectorized gather/scatter measured slower
+— numpy fancy indexing on the strided axis runs ~50x slow and the
+transpose-view form streams ~3x more memory), draws stay f64 (f32 `ndtri`
+is not faster and breaks the clip guard). Remaining floor: Sobol draws +
+`ndtri` ≈ 35% of wall. GPU: no GPU on this VM — future work, not faked.
+
+Regression gate: `tests/test_vectorized.py` pins the pre-P5 reference
+prices (seed 5) to 1e-9 relative and asserts > 11,000 paths/sec on the
+canonical workload.
 
 ## P4 — historical replay validation (2026-09-29, this VM)
 

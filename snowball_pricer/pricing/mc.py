@@ -73,12 +73,29 @@ def brownian_increments(n_steps: int, n_paths: int, n_assets: int, dt: float,
     W = np.zeros((n_paths, n_assets, n_steps + 1))
     total_t = n_steps * dt
     W[:, :, n_steps] = np.sqrt(total_t) * z[:, :, 0]
+    _fill_bridge(W, z, n_steps, dt)
+    dW = np.diff(W, axis=2)
+    del W, z
+    return dW
+
+
+def _fill_bridge(W: np.ndarray, z: np.ndarray, n_steps: int, dt: float) -> None:
+    """Fill interior Brownian-bridge points of ``W`` in place.
+
+    ``W``: (n_paths, n_assets, n_steps+1), zeros with the terminal column
+    already set; ``z``: (n_paths, n_assets, n_steps) normals in bridge order
+    (``z[..., 0]`` = terminal).
+
+    Deliberately a scalar Python loop, not a vectorized gather/scatter: the
+    (n_paths, n_assets) working set stays cache-resident, while the
+    vectorized form streams ~3x more memory and measured SLOWER on this VM
+    (documented in docs/p5_report.md). Identical to the pre-P5 loop.
+    """
     for j, (m, a, b) in enumerate(bridge_order(n_steps), start=1):
         ta, tb, tm = a * dt, b * dt, m * dt
         wmean = ((tb - tm) * W[:, :, a] + (tm - ta) * W[:, :, b]) / (tb - ta)
         wvar = (tm - ta) * (tb - tm) / (tb - ta)
         W[:, :, m] = wmean + np.sqrt(wvar) * z[:, :, j]
-    return np.diff(W, axis=2)
 
 
 def correlate_increments(dW: np.ndarray, corr: np.ndarray) -> np.ndarray:
@@ -122,6 +139,19 @@ class PathBatchDriver:
         self.dt = 1.0 / (252 * self.steps_per_day)
         if self.n_steps < 1:
             raise ValueError("tenor too short for the given steps_per_day")
+        # --- P5 hot-loop precomputations (per driver, done once) ---
+        mkt = market
+        n_a = len(mkt.spots)
+        self._rd = mkt.rates - mkt.divs                     # (n_assets,)
+        # Forward curve at each interval START t_i = i*dt: identical to the
+        # per-step `spots * exp((rates-divs) * t)` the old loop computed.
+        t_starts = np.arange(self.n_steps) * self.dt        # (n_steps,)
+        self._F = (mkt.spots[None, :]
+                   * np.exp(self._rd[None, :] * t_starts[:, None]))
+        # Local-vol T-weights at each interval start, per asset surface.
+        self._tw = [lv.t_weights(t_starts) for lv in mkt.lvs]
+        # dW buffer reused across steps() calls within a batch is allocated
+        # per batch (shape depends on batch size); nothing else per-step.
 
     def batches(self, n_paths: int, qmc_on: bool, seed: int,
                 batch_size: int) -> Iterator["_Batch"]:
@@ -143,12 +173,7 @@ class PathBatchDriver:
             W = np.zeros((nb, n_assets, self.n_steps + 1))
             total_t = self.n_steps * self.dt
             W[:, :, self.n_steps] = np.sqrt(total_t) * z[:, :, 0]
-            for j, (m, a, b) in enumerate(bridge_order(self.n_steps), start=1):
-                ta, tb, tm = a * self.dt, b * self.dt, m * self.dt
-                wmean = ((tb - tm) * W[:, :, a]
-                         + (tm - ta) * W[:, :, b]) / (tb - ta)
-                wvar = (tm - ta) * (tb - tm) / (tb - ta)
-                W[:, :, m] = wmean + np.sqrt(wvar) * z[:, :, j]
+            _fill_bridge(W, z, self.n_steps, self.dt)
             dW = np.diff(W, axis=2)
             del W, z
             dW = correlate_increments(dW, self.market.corr)
@@ -167,21 +192,32 @@ class _Batch:
 
         ``S_new`` is a fresh (n_paths, n_assets) array each step; ``sigma_used``
         is the local vol applied over [t_i, t_next] (frozen at interval start).
+
+        P5: the per-step body is algebraically identical to the old version —
+        same forwards (precomputed), same local-vol lookup (precomputed
+        T-weights, bitwise-identical lerp), same Euler update op order.
         """
-        mkt = self.driver.market
-        dt = self.driver.dt
-        S = np.broadcast_to(mkt.spots, (self.n_paths, len(mkt.spots))).copy()
-        for i in range(self.driver.n_steps):
-            t = i * dt
-            F = mkt.spots * np.exp((mkt.rates - mkt.divs) * t)
-            kk = np.log(S / F)  # (n_paths, n_assets)
-            sigma = np.empty_like(S)
-            for a, lv in enumerate(mkt.lvs):
-                sigma[:, a] = lv.local_vol(kk[:, a], t)
-            drift = (mkt.rates - mkt.divs - 0.5 * sigma ** 2) * dt
+        drv = self.driver
+        mkt = drv.market
+        dt = drv.dt
+        rd = drv._rd
+        F = drv._F
+        tw = drv._tw
+        lvs = mkt.lvs
+        dW = self.dW
+        n_a = len(mkt.spots)
+        S = np.broadcast_to(mkt.spots, (self.n_paths, n_a)).copy()
+        sigma = np.empty_like(S)
+        for i in range(drv.n_steps):
+            kk = np.log(S / F[i])
+            for a, lv in enumerate(lvs):
+                j0, j1, fT = tw[a]
+                sigma[:, a] = lv.local_vol_at_weights(kk[:, a], j0[i],
+                                                      j1[i], fT[i])
+            drift = (rd - 0.5 * sigma ** 2) * dt
             # dW are true Brownian increments with Var = dt (NOT standard
             # normals), so no extra sqrt(dt) here.
-            S = S * np.exp(drift + sigma * self.dW[:, :, i])
+            S = S * np.exp(drift + sigma * dW[:, :, i])
             yield i + 1, (i + 1) * dt, S, sigma
 
 

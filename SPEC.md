@@ -330,3 +330,105 @@ bps of notional, over the held day-to-day transitions —
   (same seed → identical P&L table); autocall termination unit-tested;
   maturity payoff unit-tested.
 - Measured attribution in `docs/p4_report.md` (not asserted — reported).
+
+## 8. Real-time closed loop + monitoring (P5 — implemented 2026-09-29)
+
+The "does it survive contact with a market" gate: a synthetic real-time
+loop (feed → pipeline → vectorized reprice → monitor), plus the MC hot-loop
+vectorization that makes per-snapshot repricing affordable.
+
+### 8.1 Vectorized MC hot loop (measured, not claimed)
+
+Profile-first (cProfile on the canonical 2Y/1-asset/daily workload):
+per-step `LocalVolSurface.local_vol` was ~33% of wall (numpy call overhead:
+`searchsorted` on the non-uniform T grid, double `clip`, per-asset Python
+loop); Sobol draws + `ndtri` ~30%; Brownian-bridge construction ~7%;
+per-step `basket_vol` (p,a,a) covariance cube ~6%.
+
+What changed (all draws and formulas preserved; `price()` signature
+unchanged):
+- `LocalVolSurface.t_weights(t)` + `local_vol_at_weights(k, j0, j1, fT)`
+  (`dupire.py`): T-grid weights precomputed once per driver step grid, so
+  the per-step query skips `searchsorted`; the k-lerp is bitwise identical
+  to `local_vol` (same clip, same indexing, same op order).
+- `PathBatchDriver` precomputes per-step forwards and LV T-weights
+  (`mc.py`); `_Batch.steps()` is a lean loop with identical Euler update.
+- `basket_vol` is now `sqrt(y' C y)`, `y = x·σ` (`payoff.py`): no (p,a,a)
+  cube; the hot loop reuses already-computed `perf`/`B` via
+  `_basket_vol_from_perf` (single source of truth; FP differs ~1e-16).
+- Rejected after measurement (documented, not silent): vectorized
+  Brownian-bridge gather/scatter (numpy fancy-indexing on the strided axis
+  runs ~50x slow; the transpose-view form streams ~3x more memory and
+  measured SLOWER than the cache-resident scalar loop on this VM), and
+  float32 Sobol draws (`ndtri` is not faster in f32, and `1-1e-12` rounds
+  to `1.0` in f32 so the `ndtri` clip guard breaks → `inf` normals: a
+  correctness landmine).
+
+Measured on this VM (canonical benchmark, `scripts/p2_benchmark.py`,
+100k QMC paths, batch 100k): **~1.6–1.9x speedup** (back-to-back
+old-vs-new; VM noise is large, see PERF.md). Draws are now the floor
+(~35% of wall). GPU is explicitly out of scope on this VM: no GPU
+present; a GPU port of the step loop is future work, not faked here.
+Regression: `tests/test_vectorized.py` pins the pre-P5 reference prices
+(seed 5: 0.985908899218 1-asset, 0.991773469635 2-asset ρ=0.5) to 1e-9
+relative — the vectorized code reproduces them to ~1e-13 — plus a
+paths/sec timing gate.
+
+### 8.2 Monitor (`snowball_pricer/monitoring.py`)
+
+`Alert` dataclass `{ts, kind, severity, message}` (`ts` = market time when
+known). `Monitor(config=MonitorConfig())`:
+
+| hook | alert kind | severity | fires when |
+|---|---|---|---|
+| `on_snapshot(snapshot, price_result)` | `GREEKS_DRIFT` | warning | \|Δdelta\| or \|Δvega\| between consecutive *Greeked* reprices > threshold |
+| `on_rebuild_failure(exc, asof=...)` | `ARBITRAGE_QUARANTINE` | warning | rebuild raised `ArbitrageViolation`; last-good snapshot kept |
+| `on_rebuild_failure(exc, asof=...)` | `REBUILD_FAILURE` | warning | rebuild raised anything else (e.g. fit failure); last-good kept |
+| `check_staleness(now_ts)` | `STALENESS` | critical | no published snapshot within `staleness_seconds` of market time |
+
+Defaults (`MonitorConfig`): `delta_drift_threshold=0.05` (notional units;
+typical delta ~0.9), `vega_drift_threshold=0.02` (per 1 vol pt; typical
+vega ~−0.2), `staleness_seconds=30.0`, `staleness_cooldown_seconds=300.0`
+(repeat STALENESS pages once per 5 min, not per tick). `GREEKS_DRIFT` only
+compares reprices that both carry Greeks — the loop prices Greeks on a
+slower cadence (below), so a Greeks→no-Greeks transition is expected and
+must not alert. `check_staleness` before the first publish returns None
+(quiet, not stale). All alerts accumulate in `monitor.alerts`.
+
+### 8.3 Live loop (`scripts/live_loop.py`)
+
+`python3 scripts/live_loop.py [--sim-seconds 300] [--inject-fault]
+[--seed 7] [--n-paths 20000] [--rebuild-every 120] [--greeks-every 5]`:
+
+- Feed: P4's `RegimeTickFeed`, 3 regimes (calm 40% / stress 20% / calm
+  40% of the run; atm_vol 0.20/0.38/0.22), deterministic per `--seed`.
+- Ticks → `QuoteStore.update` (fast path); `rebuild_surface` every
+  `rebuild_every` ticks; failures quarantined → `monitor.on_rebuild_failure`.
+- Each published snapshot is repriced with the vectorized engine
+  (`n_paths=20000`, fixed seed = intentional CRN across time so moves are
+  market moves, not MC noise); full Greeks every `greeks_every`-th
+  snapshot → `monitor.on_snapshot`. `check_staleness` runs per snapshot.
+- Sizing: 20k paths ≈ 1.4 s wall vs 6 sim-seconds between snapshots;
+  Greeks runs ≈ 4x ≈ 5.6 s on a 30-sim-second cadence — a reprice always
+  fits its cadence.
+- `--inject-fault`: mid-run, two sweeps of crossed (bid > ask) quotes on
+  one strike (all expiries, call+put). Crossed quotes fail
+  `is_valid()` → dropped by the store; the drop counter must spike and the
+  book must stay clean. Proven in the log and `results/p5_live.json`.
+- Writes `results/p5_live.json` (config, stats, price series, alert list,
+  fault record, staleness self-test) and prints a run summary. Runs
+  unattended.
+
+### 8.4 P5 acceptance (met 2026-09-29)
+
+- 13 new pytest green (63 total): vectorized equivalence + timing gate,
+  monitor alert lifecycle (all four kinds, thresholds, cooldown).
+- `python3 scripts/p2_benchmark.py` re-run; before/after in PERF.md.
+- `python3 scripts/live_loop.py --sim-seconds 300 --inject-fault`
+  completes unattended; the injected fault is correctly alerted in
+  `results/p5_live.json` (drop-counter spike; quarantine path also
+  exercised — see `docs/p5_report.md`).
+- Honest limitations (§8.1, `docs/p5_report.md`): GPU future work (no GPU
+  on this VM), synthetic feed only (no broker connected — `BrokerWsFeed`
+  still a stub), Greeks cost 4x the core reprice (cadence-limited at
+  scale), draws are the remaining CPU floor.
