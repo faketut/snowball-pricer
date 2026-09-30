@@ -90,7 +90,7 @@ cadence. `GREEKS_DRIFT` did not fire — honestly reported, not gamed:
 delta sits ~0.004 across regimes for this product (autocall economics
 keep fresh-contract delta tiny and stable; the regime vol change shows up
 in price/ko_prob, not delta), far below the 0.05 threshold. The detector
-itself is proven by the 7 unit tests in `tests/test_monitoring.py`.
+itself is proven by the 9 unit tests in `tests/test_monitoring.py`.
 
 ## 3. Fault-injection proof
 
@@ -132,7 +132,7 @@ book with/without the fault (4 keys differed, all fault-target strikes).
 `Monitor` (`snowball_pricer/monitoring.py`): `on_snapshot` →
 `GREEKS_DRIFT`; `on_rebuild_failure` → `ARBITRAGE_QUARANTINE` /
 `REBUILD_FAILURE`; `check_staleness` → `STALENESS` (critical, 5-min
-cooldown). Thresholds in SPEC.md §8.2. 7 unit tests green.
+cooldown). Thresholds in SPEC.md §8.2. 9 unit tests green.
 
 ## 5. Honest limitations
 
