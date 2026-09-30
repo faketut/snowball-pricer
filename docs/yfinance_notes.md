@@ -30,6 +30,26 @@ Setup per cycle: 4 expiries ≥ 7 days out, log-moneyness wing filter
 k ∈ [-0.5, 0.3]; quotes with missing/zero bid/ask are dropped by the
 QuoteStore (counted as incomplete, never fabricated).
 
+## Measured numbers (2026-09-30 ~10:30–10:35 EDT, REGULAR TRADING HOURS)
+
+Same command, re-run with the market open (raw: `results/yfinance_quality_rth.json`,
+gitignored). Chains moved between cycles (live data), and cycle times were
+noticeably slower than after-hours (Yahoo throttles harder during RTH).
+
+| Underlying | Rows/cycle | Valid bid+ask | Completeness | Pipelines published | Calib. RMSE (IV pts) |
+|---|---|---|---|---|---|
+| SPY | 961 | 922 | **95.9%** | 3/3 | 0.0848 |
+| QQQ | 1047 | 1004 | **95.9%** | 3/3 | 0.1514 |
+| IWM | 472 | 418 | **88.6%** | 3/3 | 0.1119 |
+| **Overall** | 2480 | 2344 | **94.5%** | **9/9 (quarantine 0%)** | — |
+
+Reading the after-hours run as a "lower bound" was wrong, or at least
+incomplete: RTH completeness (94.5%) is *slightly below* the after-hours run
+(95.3%), driven by IWM's thinner chain (88.6%). What RTH buys is not more
+quotes — it is *live* quotes: expiries repriced between cycles and
+market-maker spreads actually present. The 15-minute delay remains the
+binding limitation (caveat 4), unchanged by session.
+
 ## Caveats — read before citing these numbers
 
 1. **After-hours lower bound.** The market was closed (22:45 EDT). Chains
@@ -61,9 +81,11 @@ QuoteStore (counted as incomplete, never fabricated).
 
 ## Recommendation
 
-- Re-run `scripts/yfinance_quality.py` during **09:30–16:00 ET** for the
-  fair completeness/RMSE measurement.
-- Keep the 60s+ cadence and request pacing; Yahoo throttles aggressively.
+- ~~Re-run `scripts/yfinance_quality.py` during **09:30–16:00 ET** for the~~
+  ~~fair completeness/RMSE measurement.~~ **Done 2026-09-30** — RTH numbers
+  above; the after-hours "lower bound" framing was retracted.
+- Keep the 60s+ cadence and request pacing; Yahoo throttles aggressively
+  (worse during RTH than after hours).
 - When the Questrade live adapter is smoke-tested, compare its surface
   RMSE against this baseline on the same underlyings — that is the
   apples-to-apples delayed-vs-live read.

@@ -17,6 +17,14 @@ yfinance is the default validation feed (`is_delayed=True` hardcoded); Questrade
 optional upgrade (needs a refresh token + market-data subscription — see
 `docs/questrade_setup.md`). The feed contract lives in `snowball_pricer/tick.py`.
 
+## Visualization
+
+![SPY IV smile, live RTH](docs/assets/iv_smile_rth.png)
+
+SPY implied-vol smile from a live yfinance chain (RTH, ~15-min delayed), fitted with the
+P1 SSVI pipeline. Interactive version with the 3D surface, measured price sensitivities,
+and the P4 P&L-explain waterfall: [`docs/demo.html`](docs/demo.html).
+
 ## Error budget
 
 | | Source | Target |

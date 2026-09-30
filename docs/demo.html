@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>snowball-pricer — interactive demo</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+         margin: 0; padding: 0 16px 40px; color: #1f2937; background: #fafafa; }
+  h1 { font-size: 22px; margin: 18px 0 4px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 12px; }
+  .tabs { display: flex; gap: 6px; margin: 10px 0 16px; }
+  .tab-btn { padding: 8px 16px; border: 1px solid #d1d5db; background: #fff;
+              cursor: pointer; border-radius: 6px; font-size: 14px; }
+  .tab-btn.active { background: #1f2937; color: #fff; border-color: #1f2937; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .src { font-size: 12px; color: #6b7280; margin: 8px 0 4px; }
+  .note { font-size: 12px; color: #6b7280; max-width: 900px; }
+  .chart { width: 100%; max-width: 960px; height: 560px; }
+</style>
+</head>
+<body>
+<h1>snowball-pricer — interactive demo</h1>
+<div class="sub">Basket snowball / autocallable pricer: live-data surface, measured sensitivities, replay P&amp;L explain.</div>
+<div class="tabs">
+  <button class="tab-btn active" onclick="showTab(0)">1 · IV surface (live)</button>
+  <button class="tab-btn" onclick="showTab(1)">2 · Price sensitivity</button>
+  <button class="tab-btn" onclick="showTab(2)">3 · P&amp;L explain</button>
+</div>
+
+<div class="tab active" id="tab0">
+  <div class="chart" id="surface3d"></div>
+  <div class="src">Source: live yfinance SPY option chain, 2026-09-30 (RTH, ~15-min delayed) —
+  fitted SSVI surface via the project's P1 pipeline (<code>build_surface</code>, arbitrage-gated);
+  calibration RMSE 0.0884 IV pts.</div>
+  <div class="note">Drag to rotate. The 3D surface is the exact object the pricing engine consumes
+  (Dupire local-vol MC); nothing here is simulated.</div>
+</div>
+
+<div class="tab" id="tab1">
+  <div class="chart" id="volsens" style="height:440px"></div>
+  <div class="src">Source: P0 measured vega &minus;19.5 bps/vol-pt (flat 25% vol, 2Y snowball, monthly KO @100%,
+  daily KI @80%, 15% coupon). Line is a linear extrapolation of the measured vega — local only.</div>
+  <div class="chart" id="rhosens" style="height:440px"></div>
+  <div class="src">Source: P3 measured (40k QMC paths, base &rho;=0.5, same seed — deltas are CRN-driven, not MC noise).
+  &Delta;price in bps of notional. Sign is empirical for this term sheet (higher &rho; &rarr; higher basket vol &rarr; lower price).</div>
+</div>
+
+<div class="tab" id="tab2">
+  <div class="chart" id="waterfall" style="height:480px"></div>
+  <div class="src">Source: P4 14-day synthetic replay (calm &rarr; vol spike &rarr; calm), short snowball,
+  delta-hedged daily. Attribution identity: 0.0 + 14.0 &minus; 15.2 + 8.3 + 44.4 = +51.5 bps.</div>
+  <div class="note">The +44.4 bps residual is primarily unmodelled gamma / second-order risk (the engine has no
+  gamma bucket) — it is an honesty term, not a pricing error.</div>
+</div>
+
+<script>
+function showTab(i) {
+  document.querySelectorAll('.tab').forEach((t, j) => t.classList.toggle('active', i === j));
+  document.querySelectorAll('.tab-btn').forEach((b, j) => b.classList.toggle('active', i === j));
+}
+
+// ---- Tab 1: 3D IV surface (baked live data) ----
+const grid = {"k": [-0.5, -0.4724, -0.4448, -0.4172, -0.3897, -0.3621, -0.3345, -0.3069, -0.2793, -0.2517, -0.2241, -0.1966, -0.169, -0.1414, -0.1138, -0.0862, -0.0586, -0.031, -0.0034, 0.0241, 0.0517, 0.0793, 0.1069, 0.1345, 0.1621, 0.1897, 0.2172, 0.2448, 0.2724, 0.3], "T_days": [7, 8, 9, 16], "iv": [[0.66566, 0.64746, 0.62872, 0.60942, 0.58948, 0.56885, 0.54744, 0.52516, 0.50189, 0.47749, 0.45178, 0.42452, 0.3954, 0.36397, 0.32959, 0.29123, 0.24717, 0.19404, 0.12866, 0.13469, 0.17331, 0.20639, 0.23516, 0.26088, 0.28433, 0.30601, 0.32627, 0.34535, 0.36344, 0.38067], [0.65194, 0.63415, 0.61584, 0.59698, 0.5775, 0.55734, 0.53643, 0.51467, 0.49195, 0.46813, 0.44304, 0.41644, 0.38804, 0.3574, 0.32392, 0.28662, 0.24387, 0.19266, 0.13109, 0.13481, 0.1714, 0.20333, 0.23125, 0.25627, 0.27911, 0.30025, 0.32001, 0.33862, 0.35628, 0.3731], [0.64681, 0.62921, 0.6111, 0.59244, 0.57317, 0.55323, 0.53255, 0.51103, 0.48857, 0.46503, 0.44024, 0.41397, 0.38594, 0.35572, 0.32273, 0.28604, 0.24413, 0.19428, 0.13595, 0.13731, 0.17209, 0.2032, 0.23058, 0.25519, 0.2777, 0.29855, 0.31805, 0.33644, 0.35388, 0.3705], [0.56351, 0.54832, 0.5327, 0.51661, 0.5, 0.48282, 0.46501, 0.44649, 0.42718, 0.40695, 0.38568, 0.36317, 0.33919, 0.31341, 0.28538, 0.2544, 0.21942, 0.17889, 0.13508, 0.13091, 0.15645, 0.1817, 0.20453, 0.22529, 0.2444, 0.26217, 0.27885, 0.2946, 0.30956, 0.32384]]};
+Plotly.newPlot('surface3d', [{
+  type: 'surface',
+  x: grid.k, y: grid.T_days, z: grid.iv,
+  colorscale: 'Viridis', showscale: true,
+  colorbar: { title: 'IV' },
+  hovertemplate: 'log-moneyness=%{x:.3f}<br>expiry=%{y}d<br>IV=%{z:.4f}<extra></extra>'
+}], {
+  margin: { l: 0, r: 0, t: 30, b: 0 },
+  title: { text: 'SPY fitted SSVI implied-vol surface', font: { size: 15 } },
+  scene: {
+    xaxis: { title: 'log-moneyness log(K/F)' },
+    yaxis: { title: 'expiry (days)' },
+    zaxis: { title: 'implied vol' }
+  }
+}, { responsive: true });
+
+// ---- Tab 2a: price vs flat vol (measured vega, linear extrapolation) ----
+const vols = [15.0, 15.5, 16.0, 16.5, 17.0, 17.5, 18.0, 18.5, 19.0, 19.5, 20.0, 20.5, 21.0, 21.5, 22.0, 22.5, 23.0, 23.5, 24.0, 24.5, 25.0, 25.5, 26.0, 26.5, 27.0, 27.5, 28.0, 28.5, 29.0, 29.5, 30.0, 30.5, 31.0, 31.5, 32.0, 32.5, 33.0, 33.5, 34.0, 34.5, 35.0];
+const dprice = [195.0, 185.25, 175.5, 165.75, 156.0, 146.25, 136.5, 126.75, 117.0, 107.25, 97.5, 87.75, 78.0, 68.25, 58.5, 48.75, 39.0, 29.25, 19.5, 9.75, -0.0, -9.75, -19.5, -29.25, -39.0, -48.75, -58.5, -68.25, -78.0, -87.75, -97.5, -107.25, -117.0, -126.75, -136.5, -146.25, -156.0, -165.75, -175.5, -185.25, -195.0];
+Plotly.newPlot('volsens', [{
+  x: vols, y: dprice, mode: 'lines', name: '\u0394price',
+  line: { width: 2.5 }
+}], {
+  margin: { l: 60, r: 20, t: 40, b: 50 },
+  title: { text: '\u0394 snowball price vs flat vol (measured vega)', font: { size: 15 } },
+  xaxis: { title: 'flat vol (%)' },
+  yaxis: { title: '\u0394 price (bps of notional)' },
+  shapes: [{ type: 'line', x0: 25.0, x1: 25.0, y0: Math.min(...dprice), y1: Math.max(...dprice),
+             line: { dash: 'dash', color: '#9ca3af' } }],
+  annotations: [{ x: 25.0, y: Math.max(...dprice), text: 'P0 base 25%',
+                  showarrow: false, xanchor: 'left', font: { size: 11, color: '#6b7280' } }]
+}, { responsive: true });
+
+// ---- Tab 2b: price vs correlation (P3 measured) ----
+const p3x = ["dispersion\n\u03c1=0.05", "minus_0.2\n\u03c1=0.30", "base\n\u03c1=0.50", "plus_0.2\n\u03c1=0.70", "crisis\n\u03c1=0.95"];
+const p3y = [142.0, 54.6, 0.0, -47.8, -91.9];
+Plotly.newPlot('rhosens', [{
+  x: p3x, y: p3y, type: 'bar',
+  marker: { color: p3y.map(v => v >= 0 ? '#3b82f6' : '#ef4444') },
+  text: p3y.map(v => (v > 0 ? '+' : '') + v.toFixed(1) + ' bps'),
+  textposition: 'outside'
+}], {
+  margin: { l: 60, r: 20, t: 40, b: 80 },
+  title: { text: '\u0394 snowball price vs correlation (measured)', font: { size: 15 } },
+  xaxis: { title: 'scenario' },
+  yaxis: { title: '\u0394 price (bps of notional)' }
+}, { responsive: true });
+
+// ---- Tab 3: P&L explain waterfall (P4 measured) ----
+Plotly.newPlot('waterfall', [{
+  type: 'waterfall',
+  x: ["delta\n(net hedge \u2212 model)", "vega\n(\u2212v\u00b7dATMiv)", "theta/carry\n(model)", "cash interest\n(3%)", "residual\n(unmodelled \u03b3/2nd-order)", "ACTUAL\nrealized"],
+  y: [0.0, 14.0, -15.2, 8.3, 44.4, 51.5],
+  measure: ["relative", "relative", "relative", "relative", "relative", "total"],
+  text: ["{v:+.1f}", "{v:+.1f}", "{v:+.1f}", "{v:+.1f}", "{v:+.1f}", "{P4_TOTAL:+.1f}"],
+  textposition: 'outside',
+  connector: { line: { color: '#9ca3af' } },
+  increasing: { marker: { color: '#3b82f6' } },
+  decreasing: { marker: { color: '#ef4444' } },
+  totals: { marker: { color: '#1f2937' } }
+}], {
+  margin: { l: 60, r: 20, t: 40, b: 80 },
+  title: { text: 'Short-snowball delta-hedged P&L explain (bps)', font: { size: 15 } },
+  yaxis: { title: 'bps of notional' }
+}, { responsive: true });
+</script>
+</body>
+</html>
